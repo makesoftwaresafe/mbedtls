@@ -1,19 +1,7 @@
 #! /usr/bin/env sh
 
 # Copyright The Mbed TLS Contributors
-# SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License"); you may
-# not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
-# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-License-Identifier: Apache-2.0 OR GPL-2.0-or-later
 #
 # Purpose
 #
@@ -34,8 +22,21 @@ EOF
     exit
 fi
 
-if [ -d library -a -d include -a -d tests ]; then :; else
-    echo "Must be run from mbed TLS root" >&2
+. framework/scripts/project_detection.sh
+
+if in_mbedtls_repo; then
+    if [ -d tf-psa-crypto ]; then
+        crypto_core_dir='tf-psa-crypto/core'
+        builtin_drivers_dir='tf-psa-crypto/drivers/builtin/src'
+    else
+        crypto_core_dir='library'
+        builtin_drivers_dir='library'
+    fi
+elif in_tf_psa_crypto_repo; then
+    crypto_core_dir='core'
+    builtin_drivers_dir='drivers/builtin/src/'
+else
+    echo "Must be run from Mbed TLS root or TF-PSA-Crypto root" >&2
     exit 1
 fi
 
@@ -82,7 +83,14 @@ check()
         fi
     done
 
-    "$SCRIPT"
+    # In the case of the config tests, generate only the files to be checked
+    # by the caller as they are divided into Mbed TLS and TF-PSA-Crypto
+    # specific ones.
+    if [ "${SCRIPT##*/}" = "generate_config_tests.py" ]; then
+        "$SCRIPT" "$@"
+    else
+        "$SCRIPT"
+    fi
 
     # Compare the script output to the old files and remove backups
     for FILE in "$@"; do
@@ -116,14 +124,65 @@ check()
     fi
 }
 
-check scripts/generate_errors.pl library/error.c
-check scripts/generate_query_config.pl programs/test/query_config.c
-check scripts/generate_driver_wrappers.py library/psa_crypto_driver_wrappers.c
-check scripts/generate_features.pl library/version_features.c
-check scripts/generate_ssl_debug_helpers.py library/ssl_debug_helpers_generated.c
-# generate_visualc_files enumerates source files (library/*.c). It doesn't
-# care about their content, but the files must exist. So it must run after
-# the step that creates or updates these files.
-check scripts/generate_visualc_files.pl visualc/VS2010
-check scripts/generate_psa_constants.py programs/psa/psa_constant_names_generated.c
-check tests/scripts/generate_psa_tests.py $(tests/scripts/generate_psa_tests.py --list)
+# Note: if the format of calls to the "check" function changes, update
+# framework/scripts/code_style.py accordingly. For generated C source files (*.h or *.c),
+# the format must be "check SCRIPT FILENAME...". For other source files,
+# any shell syntax is permitted (including e.g. command substitution).
+
+# Note: Instructions to generate those files are replicated in:
+#   - **/Makefile (to (re)build them with make)
+#   - **/CMakeLists.txt (to (re)build them with cmake)
+#   - scripts/make_generated_files.bat (to generate them under Windows)
+
+# These checks are common to Mbed TLS and TF-PSA-Crypto
+
+# The first case is temporary for the hybrid situation with a tf-psa-crypto
+# directory in Mbed TLS that is not just a TF-PSA-Crypto submodule.
+if [ -d tf-psa-crypto ]; then
+    cd tf-psa-crypto
+    check scripts/generate_psa_constants.py ./programs/psa/psa_constant_names_generated.c
+    check ../framework/scripts/generate_bignum_tests.py $(../framework/scripts/generate_bignum_tests.py --list)
+    check ../framework/scripts/generate_config_tests.py tests/suites/test_suite_config.psa_boolean.data
+    check ../framework/scripts/generate_ecp_tests.py $(../framework/scripts/generate_ecp_tests.py --list)
+    check ../framework/scripts/generate_psa_tests.py $(../framework/scripts/generate_psa_tests.py --list)
+    cd ..
+    # Generated files that are present in the repository even in the development
+    # branch. (This is intended to be temporary, until the generator scripts are
+    # fully reviewed and the build scripts support a generated header file.)
+    check framework/scripts/generate_psa_wrappers.py tf-psa-crypto/tests/include/test/psa_test_wrappers.h tf-psa-crypto/tests/src/psa_test_wrappers.c
+    check tf-psa-crypto/scripts/generate_driver_wrappers.py ${crypto_core_dir}/psa_crypto_driver_wrappers.h \
+                                                            ${crypto_core_dir}/psa_crypto_driver_wrappers_no_static.c
+    check framework/scripts/generate_config_tests.py tests/suites/test_suite_config.mbedtls_boolean.data
+else
+    check scripts/generate_psa_constants.py ./programs/psa/psa_constant_names_generated.c
+    check framework/scripts/generate_bignum_tests.py $(framework/scripts/generate_bignum_tests.py --list)
+    if in_tf_psa_crypto_repo; then
+        check framework/scripts/generate_config_tests.py tests/suites/test_suite_config.psa_boolean.data
+    else
+        check framework/scripts/generate_config_tests.py tests/suites/test_suite_config.mbedtls_boolean.data
+    fi
+    check framework/scripts/generate_ecp_tests.py $(framework/scripts/generate_ecp_tests.py --list)
+    check framework/scripts/generate_psa_tests.py $(framework/scripts/generate_psa_tests.py --list)
+    check scripts/generate_driver_wrappers.py ${crypto_core_dir}/psa_crypto_driver_wrappers.h \
+                                              ${crypto_core_dir}/psa_crypto_driver_wrappers_no_static.c
+    # Generated files that are present in the repository even in the development
+    # branch. (This is intended to be temporary, until the generator scripts are
+    # fully reviewed and the build scripts support a generated header file.)
+    check framework/scripts/generate_psa_wrappers.py tests/include/test/psa_test_wrappers.h tests/src/psa_test_wrappers.c
+fi
+
+check framework/scripts/generate_test_keys.py framework/tests/include/test/test_keys.h
+
+# Additional checks for Mbed TLS only
+if in_mbedtls_repo; then
+    check scripts/generate_errors.pl library/error.c
+    check scripts/generate_query_config.pl programs/test/query_config.c
+    check scripts/generate_features.pl library/version_features.c
+    check framework/scripts/generate_ssl_debug_helpers.py library/ssl_debug_helpers_generated.c
+    check framework/scripts/generate_tls13_compat_tests.py tests/opt-testcases/tls13-compat.sh
+    check framework/scripts/generate_test_cert_macros.py tests/src/test_certs.h
+    # generate_visualc_files enumerates source files (library/*.c). It doesn't
+    # care about their content, but the files must exist. So it must run after
+    # the step that creates or updates these files.
+    check scripts/generate_visualc_files.pl visualc/VS2017
+fi

@@ -1,36 +1,32 @@
-Notes:
-* Pull requests cannot be accepted until the PR follows the [contributing guidelines](../CONTRIBUTING.md). In particular, each commit must have at least one `Signed-off-by:` line from the committer to certify that the contribution is made under the terms of the [Developer Certificate of Origin](../dco.txt).
-* This is just a template, so feel free to use/remove the unnecessary things
 ## Description
-A few sentences describing the overall goals of the pull request's commits.
+
+Please write a few sentences describing the overall goals of the pull request's commits.
 
 
-## Status
-**READY/IN DEVELOPMENT/HOLD**
 
-## Requires Backporting
-When there is a bug fix, it should be backported to all maintained and supported branches.
-Changes do not have to be backported if:
-- This PR is a new feature\enhancement
-- This PR contains changes in the API. If this is true, and there is a need for the fix to be backported, the fix should be handled differently in the legacy branch
+## PR checklist
 
-Yes | NO  
-Which branch?
+Please remove the segment/s on either side of the | symbol as appropriate, and add any relevant link/s to the end of the line.
+If the provided content is part of the present PR remove the # symbol.
 
-## Migrations
-If there is any API change, what's the incentive and logic for it.
-
-YES | NO
-
-## Additional comments
-Any additional information that could be of interest
-
-## Todos
-- [ ] Tests
-- [ ] Documentation
-- [ ] Changelog updated
-- [ ] Backported
+- [ ] **changelog** provided | not required because: 
+- [ ] **development PR** provided # | not required because: 
+- [ ] **TF-PSA-Crypto PR** provided # | not required because: 
+- [ ] **framework PR** provided Mbed-TLS/mbedtls-framework# | not required
+- [ ] **3.6 PR** provided # | not required because: 
+- [ ] **2.28 PR** provided # | not required because: 
+- **tests**  provided | not required because: 
 
 
-## Steps to test or reproduce
-Outline the steps to test or reproduce the PR here.
+
+## Notes for the submitter
+
+Please refer to the [contributing guidelines](https://github.com/Mbed-TLS/mbedtls/blob/development/CONTRIBUTING.md), especially the
+checklist for PR contributors.
+
+Help make review efficient:
+* Multiple simple commits
+  - please structure your PR into a series of small commits, each of which does one thing
+* Avoid force-push
+  - please do not force-push to update your PR - just add new commit(s)
+* See our [Guidelines for Contributors](https://mbed-tls.readthedocs.io/en/latest/reviews/review-for-contributors/) for more details about the review process.

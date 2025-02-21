@@ -13,7 +13,7 @@
 # - MBEDTLS_TARGET_PREFIX: CMake targets are designed to be alterable by calling
 #   CMake in order to avoid target name clashes, via the use of
 #   MBEDTLS_TARGET_PREFIX. The value of this variable is prefixed to the
-#   mbedtls, mbedx509, mbedcrypto and apidoc targets.
+#   mbedtls, mbedx509, tfpsacrypto and mbedtls-apidoc targets.
 #
 
 # We specify a minimum requirement of 3.10.2, but for now use 3.5.1 here
@@ -21,6 +21,10 @@
 cmake_minimum_required(VERSION 3.5.1)
 
 include(CMakePackageConfigHelpers)
+
+# Include convenience functions for printing properties and variables, like
+# cmake_print_properties(), cmake_print_variables().
+include(CMakePrintHelpers)
 
 # https://cmake.org/cmake/help/latest/policy/CMP0011.html
 # Setting this policy is required in CMake >= 3.18.0, otherwise a warning is generated. The OLD
@@ -34,14 +38,20 @@ cmake_policy(SET CMP0011 NEW)
 cmake_policy(SET CMP0012 NEW)
 
 if(TEST_CPP)
-    project("mbed TLS" C CXX)
+    project("Mbed TLS"
+        LANGUAGES C CXX
+        VERSION 4.0.0
+    )
 else()
-    project("mbed TLS" C)
+    project("Mbed TLS"
+        LANGUAGES C
+        VERSION 4.0.0
+    )
 endif()
 
 include(GNUInstallDirs)
 
-# Determine if mbed TLS is being built as a subproject using add_subdirectory()
+# Determine if Mbed TLS is being built as a subproject using add_subdirectory()
 if(NOT DEFINED MBEDTLS_AS_SUBPROJECT)
   set(MBEDTLS_AS_SUBPROJECT ON)
   if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
@@ -49,32 +59,46 @@ if(NOT DEFINED MBEDTLS_AS_SUBPROJECT)
   endif()
 endif()
 
-# Set the project root directory.
+# Set the project and framework root directory.
 set(MBEDTLS_DIR ${CMAKE_CURRENT_SOURCE_DIR})
+set(MBEDTLS_FRAMEWORK_DIR ${CMAKE_CURRENT_SOURCE_DIR}/framework)
 
-option(ENABLE_PROGRAMS "Build mbed TLS programs." ON)
+option(ENABLE_PROGRAMS "Build Mbed TLS programs." ON)
 
-option(UNSAFE_BUILD "Allow unsafe builds. These builds ARE NOT SECURE." OFF)
 option(MBEDTLS_FATAL_WARNINGS "Compiler warnings treated as errors" ON)
 if(CMAKE_HOST_WIN32)
-    option(GEN_FILES "Generate the auto-generated files as needed" OFF)
+    # N.B. The comment on the next line is significant! If you change it,
+    # edit the sed command in prepare_release.sh that modifies
+    # CMakeLists.txt.
+    option(GEN_FILES "Generate the auto-generated files as needed" OFF) # off in development
 else()
     option(GEN_FILES "Generate the auto-generated files as needed" ON)
 endif()
 
 option(DISABLE_PACKAGE_CONFIG_AND_INSTALL "Disable package configuration, target export and installation" ${MBEDTLS_AS_SUBPROJECT})
 
-string(REGEX MATCH "Clang" CMAKE_COMPILER_IS_CLANG "${CMAKE_C_COMPILER_ID}")
-string(REGEX MATCH "GNU" CMAKE_COMPILER_IS_GNU "${CMAKE_C_COMPILER_ID}")
-string(REGEX MATCH "IAR" CMAKE_COMPILER_IS_IAR "${CMAKE_C_COMPILER_ID}")
-string(REGEX MATCH "MSVC" CMAKE_COMPILER_IS_MSVC "${CMAKE_C_COMPILER_ID}")
+if (CMAKE_C_SIMULATE_ID)
+    set(COMPILER_ID ${CMAKE_C_SIMULATE_ID})
+else()
+    set(COMPILER_ID ${CMAKE_C_COMPILER_ID})
+endif(CMAKE_C_SIMULATE_ID)
+
+string(REGEX MATCH "Clang" CMAKE_COMPILER_IS_CLANG "${COMPILER_ID}")
+string(REGEX MATCH "GNU" CMAKE_COMPILER_IS_GNU "${COMPILER_ID}")
+string(REGEX MATCH "IAR" CMAKE_COMPILER_IS_IAR "${COMPILER_ID}")
+string(REGEX MATCH "MSVC" CMAKE_COMPILER_IS_MSVC "${COMPILER_ID}")
 
 # the test suites currently have compile errors with MSVC
 if(CMAKE_COMPILER_IS_MSVC)
-    option(ENABLE_TESTING "Build mbed TLS tests." OFF)
+    option(ENABLE_TESTING "Build Mbed TLS tests." OFF)
 else()
-    option(ENABLE_TESTING "Build mbed TLS tests." ON)
+    option(ENABLE_TESTING "Build Mbed TLS tests." ON)
 endif()
+
+option(USE_STATIC_MBEDTLS_LIBRARY "Build Mbed TLS static library." ON)
+option(USE_SHARED_MBEDTLS_LIBRARY "Build Mbed TLS shared library." OFF)
+option(LINK_WITH_PTHREAD "Explicitly link Mbed TLS library to pthread." OFF)
+option(LINK_WITH_TRUSTED_STORAGE "Explicitly link Mbed TLS library to trusted_storage." OFF)
 
 # Warning string - created as a list for compatibility with CMake 2.8
 set(CTR_DRBG_128_BIT_KEY_WARN_L1 "****  WARNING!  MBEDTLS_CTR_DRBG_USE_128_BIT_KEY defined!\n")
@@ -111,43 +135,50 @@ if(MBEDTLS_PYTHON_EXECUTABLE)
 
 endif()
 
+# We now potentially need to link all executables against PThreads, if available
+set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
+set(THREADS_PREFER_PTHREAD_FLAG TRUE)
+find_package(Threads)
+
 # If this is the root project add longer list of available CMAKE_BUILD_TYPE values
-if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+if(NOT MBEDTLS_AS_SUBPROJECT)
     set(CMAKE_BUILD_TYPE ${CMAKE_BUILD_TYPE}
-        CACHE STRING "Choose the type of build: None Debug Release Coverage ASan ASanDbg MemSan MemSanDbg Check CheckFull"
+        CACHE STRING "Choose the type of build: None Debug Release Coverage ASan ASanDbg MemSan MemSanDbg Check CheckFull TSan TSanDbg"
         FORCE)
 endif()
 
+# Make MBEDTLS_CONFIG_FILE and MBEDTLS_USER_CONFIG_FILE into PATHs
+set(MBEDTLS_CONFIG_FILE "" CACHE FILEPATH "Mbed TLS config file (overrides default).")
+set(MBEDTLS_USER_CONFIG_FILE "" CACHE FILEPATH "Mbed TLS user config file (appended to default).")
+
 # Create a symbolic link from ${base_name} in the binary directory
 # to the corresponding path in the source directory.
+# Note: Copies the file(s) on Windows.
 function(link_to_source base_name)
-    # Get OS dependent path to use in `execute_process`
-    if (CMAKE_HOST_WIN32)
-        #mklink is an internal command of cmd.exe it can only work with \
-        string(REPLACE "/" "\\" link "${CMAKE_CURRENT_BINARY_DIR}/${base_name}")
-        string(REPLACE "/" "\\" target "${CMAKE_CURRENT_SOURCE_DIR}/${base_name}")
-    else()
-        set(link "${CMAKE_CURRENT_BINARY_DIR}/${base_name}")
-        set(target "${CMAKE_CURRENT_SOURCE_DIR}/${base_name}")
-    endif()
+    set(link "${CMAKE_CURRENT_BINARY_DIR}/${base_name}")
+    set(target "${CMAKE_CURRENT_SOURCE_DIR}/${base_name}")
 
-    if (NOT EXISTS ${link})
+    # Linking to non-existent file is not desirable. At best you will have a
+    # dangling link, but when building in tree, this can create a symbolic link
+    # to itself.
+    if (EXISTS ${target} AND NOT EXISTS ${link})
         if (CMAKE_HOST_UNIX)
-            set(command ln -s ${target} ${link})
+            execute_process(COMMAND ln -s ${target} ${link}
+                RESULT_VARIABLE result
+                ERROR_VARIABLE output)
+
+            if (NOT ${result} EQUAL 0)
+                message(FATAL_ERROR "Could not create symbolic link for: ${target} --> ${output}")
+            endif()
         else()
             if (IS_DIRECTORY ${target})
-                set(command cmd.exe /c mklink /j ${link} ${target})
+                file(GLOB_RECURSE files FOLLOW_SYMLINKS LIST_DIRECTORIES false RELATIVE ${target} "${target}/*")
+                foreach(file IN LISTS files)
+                    configure_file("${target}/${file}" "${link}/${file}" COPYONLY)
+                endforeach(file)
             else()
-                set(command cmd.exe /c mklink /h ${link} ${target})
+                configure_file(${target} ${link} COPYONLY)
             endif()
-        endif()
-
-        execute_process(COMMAND ${command}
-            RESULT_VARIABLE result
-            ERROR_VARIABLE output)
-
-        if (NOT ${result} EQUAL 0)
-            message(FATAL_ERROR "Could not create symbolic link for: ${target} --> ${output}")
         endif()
     endif()
 endfunction(link_to_source)
@@ -168,107 +199,210 @@ function(get_name_without_last_ext dest_var full_name)
     set(${dest_var} ${no_ext_name} PARENT_SCOPE)
 endfunction(get_name_without_last_ext)
 
-string(REGEX MATCH "Clang" CMAKE_COMPILER_IS_CLANG "${CMAKE_C_COMPILER_ID}")
-
 include(CheckCCompilerFlag)
 
 set(CMAKE_C_EXTENSIONS OFF)
 set(CMAKE_C_STANDARD 99)
 
-if(CMAKE_COMPILER_IS_GNU)
+function(set_base_compile_options target)
+    if(CMAKE_COMPILER_IS_GNU)
+        set_gnu_base_compile_options(${target})
+    elseif(CMAKE_COMPILER_IS_CLANG)
+        set_clang_base_compile_options(${target})
+    elseif(CMAKE_COMPILER_IS_IAR)
+        set_iar_base_compile_options(${target})
+    elseif(CMAKE_COMPILER_IS_MSVC)
+        set_msvc_base_compile_options(${target})
+    endif()
+endfunction(set_base_compile_options)
+
+function(set_gnu_base_compile_options target)
     # some warnings we want are not available with old GCC versions
     # note: starting with CMake 2.8 we could use CMAKE_C_COMPILER_VERSION
     execute_process(COMMAND ${CMAKE_C_COMPILER} -dumpversion
                     OUTPUT_VARIABLE GCC_VERSION)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Wwrite-strings")
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wwrite-strings -Wmissing-prototypes)
     if (GCC_VERSION VERSION_GREATER 3.0 OR GCC_VERSION VERSION_EQUAL 3.0)
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wformat=2 -Wno-format-nonliteral")
+        target_compile_options(${target} PRIVATE -Wformat=2 -Wno-format-nonliteral)
     endif()
     if (GCC_VERSION VERSION_GREATER 4.3 OR GCC_VERSION VERSION_EQUAL 4.3)
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wvla")
+        target_compile_options(${target} PRIVATE -Wvla)
     endif()
     if (GCC_VERSION VERSION_GREATER 4.5 OR GCC_VERSION VERSION_EQUAL 4.5)
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wlogical-op")
+        target_compile_options(${target} PRIVATE -Wlogical-op)
     endif()
     if (GCC_VERSION VERSION_GREATER 4.8 OR GCC_VERSION VERSION_EQUAL 4.8)
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wshadow")
+        target_compile_options(${target} PRIVATE -Wshadow)
     endif()
     if (GCC_VERSION VERSION_GREATER 5.0)
         CHECK_C_COMPILER_FLAG("-Wformat-signedness" C_COMPILER_SUPPORTS_WFORMAT_SIGNEDNESS)
         if(C_COMPILER_SUPPORTS_WFORMAT_SIGNEDNESS)
-            set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wformat-signedness")
+            target_compile_options(${target} PRIVATE -Wformat-signedness)
         endif()
     endif()
     if (GCC_VERSION VERSION_GREATER 7.0 OR GCC_VERSION VERSION_EQUAL 7.0)
-      set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wformat-overflow=2 -Wformat-truncation")
+      target_compile_options(${target} PRIVATE -Wformat-overflow=2 -Wformat-truncation)
     endif()
-    set(CMAKE_C_FLAGS_RELEASE     "-O2")
-    set(CMAKE_C_FLAGS_DEBUG       "-O0 -g3")
-    set(CMAKE_C_FLAGS_COVERAGE    "-O0 -g3 --coverage")
-    set(CMAKE_C_FLAGS_ASAN        "-fsanitize=address -fno-common -fsanitize=undefined -fno-sanitize-recover=all -O3")
-    set(CMAKE_C_FLAGS_ASANDBG     "-fsanitize=address -fno-common -fsanitize=undefined -fno-sanitize-recover=all -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls")
-    set(CMAKE_C_FLAGS_CHECK       "-Os")
-    set(CMAKE_C_FLAGS_CHECKFULL   "${CMAKE_C_FLAGS_CHECK} -Wcast-qual")
-endif(CMAKE_COMPILER_IS_GNU)
+    target_compile_options(${target} PRIVATE $<$<CONFIG:Release>:-O2>)
+    target_compile_options(${target} PRIVATE $<$<CONFIG:Debug>:-O0 -g3>)
+    target_compile_options(${target} PRIVATE $<$<CONFIG:Coverage>:-O0 -g3 --coverage>)
+    set_target_properties(${target} PROPERTIES LINK_FLAGS_COVERAGE "--coverage")
+    # Old GCC versions hit a performance problem with test_suite_pkwrite
+    # "Private keey write check EC" tests when building with Asan+UBSan
+    # and -O3: those tests take more than 100x time than normal, with
+    # test_suite_pkwrite taking >3h on the CI. Observed with GCC 5.4 on
+    # Ubuntu 16.04 x86_64 and GCC 6.5 on Ubuntu 18.04 x86_64.
+    # GCC 7.5 and above on Ubuntu 18.04 appear fine.
+    # To avoid the performance problem, we use -O2 when GCC version is lower than 7.0.
+    # It doesn't slow down much even with modern compiler versions.
+    target_compile_options(${target} PRIVATE $<$<CONFIG:ASan>:-fsanitize=address -fno-common -fsanitize=undefined -fno-sanitize-recover=all>)
+    if (GCC_VERSION VERSION_LESS 7.0)
+        target_compile_options(${target} PRIVATE $<$<CONFIG:ASan>:-O2>)
+    else()
+        target_compile_options(${target} PRIVATE $<$<CONFIG:ASan>:-O3>)
+    endif()
+    set_target_properties(${target} PROPERTIES LINK_FLAGS_ASAN "-fsanitize=address -fsanitize=undefined")
+    target_compile_options(${target} PRIVATE $<$<CONFIG:ASanDbg>:-fsanitize=address -fno-common -fsanitize=undefined -fno-sanitize-recover=all -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls>)
+    set_target_properties(${target} PROPERTIES LINK_FLAGS_ASANDBG "-fsanitize=address -fsanitize=undefined")
+    target_compile_options(${target} PRIVATE $<$<CONFIG:TSan>:-fsanitize=thread -O3>)
+    set_target_properties(${target} PROPERTIES LINK_FLAGS_TSAN "-fsanitize=thread")
+    target_compile_options(${target} PRIVATE $<$<CONFIG:TSanDbg>:-fsanitize=thread -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls>)
+    set_target_properties(${target} PROPERTIES LINK_FLAGS_TSANDBG "-fsanitize=thread")
+    target_compile_options(${target} PRIVATE $<$<CONFIG:Check>:-Os>)
+    target_compile_options(${target} PRIVATE $<$<CONFIG:CheckFull>:-Os -Wcast-qual>)
 
-if(CMAKE_COMPILER_IS_CLANG)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Wwrite-strings -Wpointer-arith -Wimplicit-fallthrough -Wshadow -Wvla -Wformat=2 -Wno-format-nonliteral")
-    set(CMAKE_C_FLAGS_RELEASE     "-O2")
-    set(CMAKE_C_FLAGS_DEBUG       "-O0 -g3")
-    set(CMAKE_C_FLAGS_COVERAGE    "-O0 -g3 --coverage")
-    set(CMAKE_C_FLAGS_ASAN        "-fsanitize=address -fno-common -fsanitize=undefined -fno-sanitize-recover=all -O3")
-    set(CMAKE_C_FLAGS_ASANDBG     "-fsanitize=address -fno-common -fsanitize=undefined -fno-sanitize-recover=all -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls")
-    set(CMAKE_C_FLAGS_MEMSAN      "-fsanitize=memory -O3")
-    set(CMAKE_C_FLAGS_MEMSANDBG   "-fsanitize=memory -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize-memory-track-origins=2")
-    set(CMAKE_C_FLAGS_CHECK       "-Os")
-endif(CMAKE_COMPILER_IS_CLANG)
+    if(MBEDTLS_FATAL_WARNINGS)
+        target_compile_options(${target} PRIVATE -Werror)
+    endif(MBEDTLS_FATAL_WARNINGS)
+endfunction(set_gnu_base_compile_options)
 
-if(CMAKE_COMPILER_IS_IAR)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} --warn_about_c_style_casts --warnings_are_errors -Ohz")
-endif(CMAKE_COMPILER_IS_IAR)
+function(set_clang_base_compile_options target)
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wwrite-strings -Wmissing-prototypes -Wpointer-arith -Wimplicit-fallthrough -Wshadow -Wvla -Wformat=2 -Wno-format-nonliteral)
+    target_compile_options(${target} PRIVATE $<$<CONFIG:Release>:-O2>)
+    target_compile_options(${target} PRIVATE $<$<CONFIG:Debug>:-O0 -g3>)
+    target_compile_options(${target} PRIVATE $<$<CONFIG:Coverage>:-O0 -g3 --coverage>)
+    set_target_properties(${target} PROPERTIES LINK_FLAGS_COVERAGE "--coverage")
+    target_compile_options(${target} PRIVATE $<$<CONFIG:ASan>:-fsanitize=address -fno-common -fsanitize=undefined -fno-sanitize-recover=all -O3>)
+    set_target_properties(${target} PROPERTIES LINK_FLAGS_ASAN "-fsanitize=address -fsanitize=undefined")
+    target_compile_options(${target} PRIVATE $<$<CONFIG:ASanDbg>:-fsanitize=address -fno-common -fsanitize=undefined -fno-sanitize-recover=all -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls>)
+    set_target_properties(${target} PROPERTIES LINK_FLAGS_ASANDBG "-fsanitize=address -fsanitize=undefined")
+    target_compile_options(${target} PRIVATE $<$<CONFIG:MemSan>:-fsanitize=memory>)
+    set_target_properties(${target} PROPERTIES LINK_FLAGS_MEMSAN "-fsanitize=memory")
+    target_compile_options(${target} PRIVATE $<$<CONFIG:MemSanDbg>:-fsanitize=memory -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize-memory-track-origins=2>)
+    set_target_properties(${target} PROPERTIES LINK_FLAGS_MEMSANDBG "-fsanitize=memory")
+    target_compile_options(${target} PRIVATE $<$<CONFIG:TSan>:-fsanitize=thread -O3>)
+    set_target_properties(${target} PROPERTIES LINK_FLAGS_TSAN "-fsanitize=thread")
+    target_compile_options(${target} PRIVATE $<$<CONFIG:TSanDbg>:-fsanitize=thread -O1 -g3 -fno-omit-frame-pointer -fno-optimize-sibling-calls>)
+    set_target_properties(${target} PROPERTIES LINK_FLAGS_TSANDBG "-fsanitize=thread")
+    target_compile_options(${target} PRIVATE $<$<CONFIG:Check>:-Os>)
 
-if(CMAKE_COMPILER_IS_MSVC)
+    if(MBEDTLS_FATAL_WARNINGS)
+        target_compile_options(${target} PRIVATE -Werror)
+    endif(MBEDTLS_FATAL_WARNINGS)
+endfunction(set_clang_base_compile_options)
+
+function(set_iar_base_compile_options target)
+    target_compile_options(${target} PRIVATE --warn_about_c_style_casts)
+    target_compile_options(${target} PRIVATE $<$<CONFIG:Release>:-Ohz>)
+    target_compile_options(${target} PRIVATE $<$<CONFIG:Debug>:--debug -On>)
+
+    if(MBEDTLS_FATAL_WARNINGS)
+        target_compile_options(${target} PRIVATE --warnings_are_errors)
+    endif(MBEDTLS_FATAL_WARNINGS)
+endfunction(set_iar_base_compile_options)
+
+function(set_msvc_base_compile_options target)
     # Strictest warnings, UTF-8 source and execution charset
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /W3 /utf-8")
-endif(CMAKE_COMPILER_IS_MSVC)
+    target_compile_options(${target} PRIVATE /W3 /utf-8)
 
-if(MBEDTLS_FATAL_WARNINGS)
-    if(CMAKE_COMPILER_IS_MSVC)
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /WX")
-    endif(CMAKE_COMPILER_IS_MSVC)
+    if(MBEDTLS_FATAL_WARNINGS)
+        target_compile_options(${target} PRIVATE /WX)
+    endif(MBEDTLS_FATAL_WARNINGS)
+endfunction(set_msvc_base_compile_options)
 
+function(set_config_files_compile_definitions target)
+    # Pass-through MBEDTLS_CONFIG_FILE, MBEDTLS_USER_CONFIG_FILE,
+    # TF_PSA_CRYPTO_CONFIG_FILE and TF_PSA_CRYPTO_USER_CONFIG_FILE
+    if(MBEDTLS_CONFIG_FILE)
+        target_compile_definitions(${target}
+            PUBLIC MBEDTLS_CONFIG_FILE="${MBEDTLS_CONFIG_FILE}")
+    endif()
+    if(MBEDTLS_USER_CONFIG_FILE)
+        target_compile_definitions(${target}
+            PUBLIC MBEDTLS_USER_CONFIG_FILE="${MBEDTLS_USER_CONFIG_FILE}")
+    endif()
+    if(TF_PSA_CRYPTO_CONFIG_FILE)
+        target_compile_definitions(${target}
+            PUBLIC TF_PSA_CRYPTO_CONFIG_FILE="${TF_PSA_CRYPTO_CONFIG_FILE}")
+    endif()
+    if(TF_PSA_CRYPTO_USER_CONFIG_FILE)
+        target_compile_definitions(${target}
+            PUBLIC TF_PSA_CRYPTO_USER_CONFIG_FILE="${TF_PSA_CRYPTO_USER_CONFIG_FILE}")
+    endif()
+endfunction(set_config_files_compile_definitions)
+
+if(CMAKE_BUILD_TYPE STREQUAL "Check" AND TEST_CPP)
+    set(CMAKE_CXX_STANDARD 11)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
+    set(CMAKE_CXX_EXTENSIONS OFF)
     if(CMAKE_COMPILER_IS_CLANG OR CMAKE_COMPILER_IS_GNU)
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Werror")
-        if(UNSAFE_BUILD)
-            set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-error=cpp")
-            set(CMAKE_C_FLAGS_ASAN "${CMAKE_C_FLAGS_ASAN} -Wno-error=cpp")
-            set(CMAKE_C_FLAGS_ASANDBG "${CMAKE_C_FLAGS_ASANDBG} -Wno-error=cpp")
-        endif(UNSAFE_BUILD)
-    endif(CMAKE_COMPILER_IS_CLANG OR CMAKE_COMPILER_IS_GNU)
-endif(MBEDTLS_FATAL_WARNINGS)
-
-if(CMAKE_BUILD_TYPE STREQUAL "Coverage")
-    if(CMAKE_COMPILER_IS_GNU OR CMAKE_COMPILER_IS_CLANG)
-        set(CMAKE_SHARED_LINKER_FLAGS "--coverage")
-    endif(CMAKE_COMPILER_IS_GNU OR CMAKE_COMPILER_IS_CLANG)
-endif(CMAKE_BUILD_TYPE STREQUAL "Coverage")
-
-if(LIB_INSTALL_DIR)
-    set(CMAKE_INSTALL_LIBDIR "${LIB_INSTALL_DIR}")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pedantic")
+    endif()
 endif()
+
+if (NOT EXISTS "${MBEDTLS_FRAMEWORK_DIR}/CMakeLists.txt")
+    if (EXISTS "${MBEDTLS_DIR}/.git")
+        message(FATAL_ERROR "${MBEDTLS_FRAMEWORK_DIR}/CMakeLists.txt not found (and does appear to be a git checkout). Run `git submodule update --init` from the source tree to fetch the submodule contents.")
+    else ()
+        message(FATAL_ERROR "${MBEDTLS_FRAMEWORK_DIR}/CMakeLists.txt not found (and does not appear to be a git checkout). Please ensure you have downloaded the right archive from the release page on GitHub.")
+    endif()
+endif()
+add_subdirectory(framework)
 
 add_subdirectory(include)
 
-add_subdirectory(3rdparty)
+set(TF_PSA_CRYPTO_TARGET_PREFIX ${MBEDTLS_TARGET_PREFIX} CACHE STRING "")
+set(TF_PSA_CRYPTO_FATAL_WARNINGS ${MBEDTLS_FATAL_WARNINGS} CACHE BOOL "")
+set(USE_STATIC_TF_PSA_CRYPTO_LIBRARY ${USE_STATIC_MBEDTLS_LIBRARY} CACHE BOOL "")
+set(USE_SHARED_TF_PSA_CRYPTO_LIBRARY ${USE_SHARED_MBEDTLS_LIBRARY} CACHE BOOL "")
+add_subdirectory(tf-psa-crypto)
+
+set(tfpsacrypto_target "${TF_PSA_CRYPTO_TARGET_PREFIX}tfpsacrypto")
+if (USE_STATIC_MBEDTLS_LIBRARY)
+    set(tfpsacrypto_static_target ${tfpsacrypto_target})
+endif()
+if(USE_STATIC_MBEDTLS_LIBRARY AND USE_SHARED_MBEDTLS_LIBRARY)
+    string(APPEND tfpsacrypto_static_target "_static")
+endif()
+
+set(tf_psa_crypto_library_targets
+    ${TF_PSA_CRYPTO_TARGET_PREFIX}tfpsacrypto
+    ${TF_PSA_CRYPTO_TARGET_PREFIX}builtin
+    ${TF_PSA_CRYPTO_TARGET_PREFIX}everest
+    ${TF_PSA_CRYPTO_TARGET_PREFIX}p256m)
+
+if(USE_STATIC_MBEDTLS_LIBRARY AND USE_SHARED_MBEDTLS_LIBRARY)
+    list(APPEND tf_psa_crypto_library_targets
+         ${TF_PSA_CRYPTO_TARGET_PREFIX}tfpsacrypto_static
+         ${TF_PSA_CRYPTO_TARGET_PREFIX}builtin_static)
+endif()
+
+foreach(target IN LISTS tf_psa_crypto_library_targets)
+    if(NOT TARGET ${target})
+        message(FATAL_ERROR "TF-PSA-Crypto target ${target} does not exist.")
+    endif()
+endforeach(target)
 
 add_subdirectory(library)
 
+add_subdirectory(pkgconfig)
+
 #
-# The C files in tests/src directory contain test code shared among test suites
+# The C files in framework/tests/src directory contain test code shared among test suites
 # and programs. This shared test code is compiled and linked to test suites and
 # programs objects as a set of compiled objects. The compiled objects are NOT
 # built into a library that the test suite and program objects would link
-# against as they link against the mbedcrypto, mbedx509 and mbedtls libraries.
+# against as they link against the tfpsacrypto, mbedx509 and mbedtls libraries.
 # The reason is that such library is expected to have mutual dependencies with
 # the aforementioned libraries and that there is as of today no portable way of
 # handling such dependencies (only toolchain specific solutions).
@@ -278,19 +412,83 @@ add_subdirectory(library)
 # to define the test executables.
 #
 if(ENABLE_TESTING OR ENABLE_PROGRAMS)
-    file(GLOB MBEDTLS_TEST_FILES ${CMAKE_CURRENT_SOURCE_DIR}/tests/src/*.c ${CMAKE_CURRENT_SOURCE_DIR}/tests/src/drivers/*.c)
+    file(GLOB MBEDTLS_TEST_FILES
+         ${MBEDTLS_FRAMEWORK_DIR}/tests/src/*.c
+         ${MBEDTLS_FRAMEWORK_DIR}/tests/src/drivers/*.c)
     add_library(mbedtls_test OBJECT ${MBEDTLS_TEST_FILES})
+    set_base_compile_options(mbedtls_test)
+    if(GEN_FILES)
+        add_custom_command(
+            OUTPUT
+                ${MBEDTLS_FRAMEWORK_DIR}/tests/src/test_keys.h
+            COMMAND
+                "${MBEDTLS_PYTHON_EXECUTABLE}"
+                "${MBEDTLS_FRAMEWORK_DIR}/scripts/generate_test_keys.py"
+                "--output"
+                "${MBEDTLS_FRAMEWORK_DIR}/tests/src/test_keys.h"
+            DEPENDS
+                ${MBEDTLS_FRAMEWORK_DIR}/scripts/generate_test_keys.py
+        )
+        add_custom_target(mbedtls_test_keys_header
+            DEPENDS ${MBEDTLS_FRAMEWORK_DIR}/tests/src/test_keys.h)
+        add_dependencies(mbedtls_test mbedtls_test_keys_header)
+    endif()
     target_include_directories(mbedtls_test
-        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/include
-        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include
-        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/library)
+        PRIVATE ${MBEDTLS_FRAMEWORK_DIR}/tests/include
+        PRIVATE tests/include
+        PRIVATE include
+        PRIVATE tf-psa-crypto/include
+        PRIVATE tf-psa-crypto/drivers/builtin/include
+        PRIVATE tf-psa-crypto/drivers/everest/include
+        PRIVATE library
+        PRIVATE tf-psa-crypto/core
+        PRIVATE tf-psa-crypto/drivers/builtin/src)
+    # Request C11, needed for memory poisoning tests
+    set_target_properties(mbedtls_test PROPERTIES C_STANDARD 11)
+    set_config_files_compile_definitions(mbedtls_test)
+
+    file(GLOB MBEDTLS_TEST_HELPER_FILES
+         tests/src/*.c tests/src/test_helpers/*.c)
+    add_library(mbedtls_test_helpers OBJECT ${MBEDTLS_TEST_HELPER_FILES})
+    set_base_compile_options(mbedtls_test_helpers)
+    if(GEN_FILES)
+        add_custom_command(
+            OUTPUT
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/src/test_certs.h
+            COMMAND
+                "${MBEDTLS_PYTHON_EXECUTABLE}"
+                "${MBEDTLS_FRAMEWORK_DIR}/scripts/generate_test_cert_macros.py"
+                "--output"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/src/test_certs.h"
+            DEPENDS
+                ${MBEDTLS_FRAMEWORK_DIR}/scripts/generate_test_cert_macros.py
+        )
+        add_custom_target(mbedtls_test_certs_header
+            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/src/test_certs.h)
+        add_dependencies(mbedtls_test_helpers mbedtls_test_certs_header)
+    endif()
+    target_include_directories(mbedtls_test_helpers
+        PRIVATE ${MBEDTLS_FRAMEWORK_DIR}/tests/include
+        PRIVATE tests/include
+        PRIVATE include
+        PRIVATE tf-psa-crypto/include
+        PRIVATE tf-psa-crypto/drivers/builtin/include
+        PRIVATE library
+        PRIVATE tf-psa-crypto/core
+        PRIVATE tf-psa-crypto/drivers/builtin/src
+        PRIVATE tf-psa-crypto/drivers/everest/include)
+
+    set_config_files_compile_definitions(mbedtls_test_helpers)
 endif()
 
 if(ENABLE_PROGRAMS)
+    set(ssl_opt_target "${MBEDTLS_TARGET_PREFIX}ssl-opt")
+    add_custom_target(${ssl_opt_target})
+
     add_subdirectory(programs)
 endif()
 
-ADD_CUSTOM_TARGET(${MBEDTLS_TARGET_PREFIX}apidoc
+ADD_CUSTOM_TARGET(${MBEDTLS_TARGET_PREFIX}mbedtls-apidoc
     COMMAND doxygen mbedtls.doxyfile
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/doxygen)
 
@@ -300,24 +498,16 @@ if(ENABLE_TESTING)
     add_subdirectory(tests)
 
     # additional convenience targets for Unix only
-    if(UNIX)
-
-        ADD_CUSTOM_TARGET(covtest
-            COMMAND make test
-            COMMAND programs/test/selftest
-            COMMAND tests/compat.sh
-            COMMAND tests/ssl-opt.sh
-        )
-
+    if(UNIX AND (NOT MBEDTLS_AS_SUBPROJECT))
+        # For coverage testing:
+        # 1. Build with:
+        #         cmake -D CMAKE_BUILD_TYPE=Coverage /path/to/source && make
+        # 2. Run the relevant tests for the part of the code you're interested in.
+        #    For the reference coverage measurement, see
+        #    tests/scripts/basic-build-test.sh
+        # 3. Run scripts/lcov.sh to generate an HTML report.
         ADD_CUSTOM_TARGET(lcov
-            COMMAND rm -rf Coverage
-            COMMAND lcov --capture --initial --directory library/CMakeFiles/mbedtls.dir -o files.info
-            COMMAND lcov --capture --directory library/CMakeFiles/mbedtls.dir -o tests.info
-            COMMAND lcov --add-tracefile files.info --add-tracefile tests.info -o all.info
-            COMMAND lcov --remove all.info -o final.info '*.h'
-            COMMAND gendesc tests/Descriptions.txt -o descriptions
-            COMMAND genhtml --title "mbed TLS" --description-file descriptions --keep-descriptions --legend --no-branch-coverage -o Coverage final.info
-            COMMAND rm -f files.info tests.info all.info final.info descriptions
+            COMMAND scripts/lcov.sh
         )
 
         ADD_CUSTOM_TARGET(memcheck
@@ -327,7 +517,7 @@ if(ENABLE_TESTING)
             COMMAND rm -f memcheck.log
             COMMAND mv DartConfiguration.tcl.bak DartConfiguration.tcl
         )
-    endif(UNIX)
+    endif()
 
     # Make scripts needed for testing available in an out-of-source build.
     if (NOT ${CMAKE_CURRENT_BINARY_DIR} STREQUAL ${CMAKE_CURRENT_SOURCE_DIR})
@@ -348,12 +538,12 @@ if(NOT DISABLE_PACKAGE_CONFIG_AND_INSTALL)
     write_basic_package_version_file(
         "cmake/MbedTLSConfigVersion.cmake"
             COMPATIBILITY SameMajorVersion
-            VERSION 3.1.0)
+            VERSION 4.0.0)
 
     install(
         FILES "${CMAKE_CURRENT_BINARY_DIR}/cmake/MbedTLSConfig.cmake"
               "${CMAKE_CURRENT_BINARY_DIR}/cmake/MbedTLSConfigVersion.cmake"
-        DESTINATION "cmake")
+        DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/MbedTLS")
 
     export(
         EXPORT MbedTLSTargets
@@ -363,7 +553,7 @@ if(NOT DISABLE_PACKAGE_CONFIG_AND_INSTALL)
     install(
         EXPORT MbedTLSTargets
         NAMESPACE MbedTLS::
-        DESTINATION "cmake"
+        DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/MbedTLS"
         FILE "MbedTLSTargets.cmake")
 
     if(CMAKE_VERSION VERSION_GREATER 3.15 OR CMAKE_VERSION VERSION_EQUAL 3.15)
