@@ -1,21 +1,6 @@
-
-# To compile on SunOS: add "-lsocket -lnsl" to LDFLAGS
-
-CFLAGS	?= -O2
-WARNING_CFLAGS ?= -Wall -Wextra -Wformat=2 -Wno-format-nonliteral
-WARNING_CXXFLAGS ?= -Wall -Wextra -Wformat=2 -Wno-format-nonliteral
-LDFLAGS ?=
-
-MBEDTLS_TEST_PATH:=../tests/src
-MBEDTLS_TEST_OBJS:=$(patsubst %.c,%.o,$(wildcard ${MBEDTLS_TEST_PATH}/*.c ${MBEDTLS_TEST_PATH}/drivers/*.c))
-
-LOCAL_CFLAGS = $(WARNING_CFLAGS) -I../tests/include -I../include -D_FILE_OFFSET_BITS=64
-LOCAL_CXXFLAGS = $(WARNING_CXXFLAGS) -I../include -I../tests/include -D_FILE_OFFSET_BITS=64
-LOCAL_LDFLAGS = ${MBEDTLS_TEST_OBJS} 		\
-		-L../library 			\
-		-lmbedtls$(SHARED_SUFFIX)	\
-		-lmbedx509$(SHARED_SUFFIX)	\
-		-lmbedcrypto$(SHARED_SUFFIX)
+MBEDTLS_TEST_PATH = ../tests
+FRAMEWORK = ${MBEDTLS_PATH}/framework
+include ../scripts/common.make
 
 ifeq ($(shell uname -s),Linux)
 DLOPEN_LDFLAGS ?= -ldl
@@ -23,43 +8,10 @@ else
 DLOPEN_LDFLAGS ?=
 endif
 
-include ../3rdparty/Makefile.inc
-LOCAL_CFLAGS+=$(THIRDPARTY_INCLUDES)
-
-ifndef SHARED
-MBEDLIBS=../library/libmbedcrypto.a ../library/libmbedx509.a ../library/libmbedtls.a
-else
-MBEDLIBS=../library/libmbedcrypto.$(DLEXT) ../library/libmbedx509.$(DLEXT) ../library/libmbedtls.$(DLEXT)
+ifdef RECORD_PSA_STATUS_COVERAGE_LOG
+LOCAL_CFLAGS += -Werror -DRECORD_PSA_STATUS_COVERAGE_LOG
 endif
 DEP=${MBEDLIBS} ${MBEDTLS_TEST_OBJS}
-
-ifdef DEBUG
-LOCAL_CFLAGS += -g3
-endif
-
-# if we're running on Windows, build for Windows
-ifdef WINDOWS
-WINDOWS_BUILD=1
-endif
-
-ifdef WINDOWS_BUILD
-DLEXT=dll
-EXEXT=.exe
-LOCAL_LDFLAGS += -lws2_32
-ifdef SHARED
-SHARED_SUFFIX=.$(DLEXT)
-endif
-else
-DLEXT ?= so
-EXEXT=
-SHARED_SUFFIX=
-endif
-
-ifdef WINDOWS
-PYTHON ?= python
-else
-PYTHON ?= $(shell if type python3 >/dev/null 2>/dev/null; then echo python3; else echo python; fi)
-endif
 
 # Only build the dlopen test in shared library builds, and not when building
 # for Windows.
@@ -73,11 +25,16 @@ else
 BUILD_DLOPEN =
 endif
 
+LOCAL_CFLAGS += -I$(FRAMEWORK)/tests/programs
+
 ## The following assignment is the list of base names of applications that
 ## will be built on Windows. Extra Linux/Unix/POSIX-only applications can
 ## be declared by appending with `APPS += ...` afterwards.
 ## See the get_app_list function in scripts/generate_visualc_files.pl and
 ## make sure to check that it still works if you tweak the format here.
+##
+## Note: Variables cannot be used to define an apps path. This cannot be
+## substituted by the script generate_visualc_files.pl.
 APPS = \
 	aes/crypt_and_hash \
 	cipher/cipher_aead_demo \
@@ -104,11 +61,12 @@ APPS = \
 	pkey/rsa_sign_pss \
 	pkey/rsa_verify \
 	pkey/rsa_verify_pss \
-	psa/aead_demo \
-	psa/crypto_examples \
-	psa/hmac_demo \
-	psa/key_ladder_demo \
-	psa/psa_constant_names \
+	../tf-psa-crypto/programs/psa/aead_demo \
+	../tf-psa-crypto/programs/psa/crypto_examples \
+	../tf-psa-crypto/programs/psa/hmac_demo \
+	../tf-psa-crypto/programs/psa/key_ladder_demo \
+	../tf-psa-crypto/programs/psa/psa_constant_names \
+	../tf-psa-crypto/programs/psa/psa_hash \
 	random/gen_entropy \
 	random/gen_random_ctr_drbg \
 	ssl/dtls_client \
@@ -121,8 +79,9 @@ APPS = \
 	ssl/ssl_mail_client \
 	ssl/ssl_server \
 	ssl/ssl_server2 \
-	test/benchmark \
+	test/metatest \
 	test/query_compile_time_config \
+	test/query_included_headers \
 	test/selftest \
 	test/udp_proxy \
 	test/zeroize \
@@ -136,7 +95,7 @@ APPS = \
 	x509/req_app \
 # End of APPS
 
-ifdef PTHREAD
+ifeq ($(THREADING),pthread)
 APPS +=	ssl/ssl_pthread_server
 endif
 
@@ -162,35 +121,38 @@ ifndef WINDOWS
 all: fuzz
 endif
 
-fuzz: ${MBEDTLS_TEST_OBJS}
-	$(MAKE) -C fuzz THIRDPARTY_INCLUDES=$(THIRDPARTY_INCLUDES)
+SSL_OPT_APPS = $(filter ssl/%,$(APPS))
+SSL_OPT_APPS += test/query_compile_time_config test/udp_proxy
+# Just the programs needed to run ssl-opt.sh (and compat.sh)
+ssl-opt: $(patsubst %,%$(EXEXT),$(SSL_OPT_APPS))
+.PHONY: ssl-opt
 
-$(MBEDLIBS):
-	$(MAKE) -C ../library
+fuzz: ${MBEDTLS_TEST_OBJS}
+	$(MAKE) -C fuzz
 
 ${MBEDTLS_TEST_OBJS}:
 	$(MAKE) -C ../tests mbedtls_test
 
 .PHONY: generated_files
-GENERATED_FILES = psa/psa_constant_names_generated.c test/query_config.c
+GENERATED_FILES = ../tf-psa-crypto/programs/psa/psa_constant_names_generated.c test/query_config.c
 generated_files: $(GENERATED_FILES)
 
-psa/psa_constant_names_generated.c: ../scripts/generate_psa_constants.py
-psa/psa_constant_names_generated.c: ../include/psa/crypto_values.h
-psa/psa_constant_names_generated.c: ../include/psa/crypto_extra.h
-psa/psa_constant_names_generated.c: ../tests/suites/test_suite_psa_crypto_metadata.data
-psa/psa_constant_names_generated.c:
+../tf-psa-crypto/programs/psa/psa_constant_names_generated.c: $(gen_file_dep) ../tf-psa-crypto/scripts/generate_psa_constants.py
+../tf-psa-crypto/programs/psa/psa_constant_names_generated.c: $(gen_file_dep) ../tf-psa-crypto/include/psa/crypto_values.h
+../tf-psa-crypto/programs/psa/psa_constant_names_generated.c: $(gen_file_dep) ../tf-psa-crypto/include/psa/crypto_extra.h
+../tf-psa-crypto/programs/psa/psa_constant_names_generated.c: $(gen_file_dep) ../tf-psa-crypto/tests/suites/test_suite_psa_crypto_metadata.data
+../tf-psa-crypto/programs/psa/psa_constant_names_generated.c:
 	echo "  Gen   $@"
-	$(PYTHON) ../scripts/generate_psa_constants.py
+	cd ../tf-psa-crypto; $(PYTHON) ./scripts/generate_psa_constants.py
 
-test/query_config.c: ../scripts/generate_query_config.pl
+test/query_config.c: $(gen_file_dep) ../scripts/generate_query_config.pl
 ## The generated file only depends on the options that are present in mbedtls_config.h,
 ## not on which options are set. To avoid regenerating this file all the time
 ## when switching between configurations, don't declare mbedtls_config.h as a
 ## dependency. Remove this file from your working tree if you've just added or
 ## removed an option in mbedtls_config.h.
-#test/query_config.c: ../include/mbedtls/mbedtls_config.h
-test/query_config.c: ../scripts/data_files/query_config.fmt
+#test/query_config.c: $(gen_file_dep) ../include/mbedtls/mbedtls_config.h
+test/query_config.c: $(gen_file_dep) ../scripts/data_files/query_config.fmt
 test/query_config.c:
 	echo "  Gen   $@"
 	$(PERL) ../scripts/generate_query_config.pl
@@ -295,25 +257,29 @@ pkey/rsa_encrypt$(EXEXT): pkey/rsa_encrypt.c $(DEP)
 	echo "  CC    pkey/rsa_encrypt.c"
 	$(CC) $(LOCAL_CFLAGS) $(CFLAGS) pkey/rsa_encrypt.c    $(LOCAL_LDFLAGS) $(LDFLAGS) -o $@
 
-psa/aead_demo$(EXEXT): psa/aead_demo.c $(DEP)
+../tf-psa-crypto/programs/psa/aead_demo$(EXEXT): ../tf-psa-crypto/programs/psa/aead_demo.c $(DEP)
 	echo "  CC    psa/aead_demo.c"
-	$(CC) $(LOCAL_CFLAGS) $(CFLAGS) psa/aead_demo.c    $(LOCAL_LDFLAGS) $(LDFLAGS) -o $@
+	$(CC) $(LOCAL_CFLAGS) $(CFLAGS) ../tf-psa-crypto/programs/psa/aead_demo.c    $(LOCAL_LDFLAGS) $(LDFLAGS) -o $@
 
-psa/crypto_examples$(EXEXT): psa/crypto_examples.c $(DEP)
+../tf-psa-crypto/programs/psa/crypto_examples$(EXEXT): ../tf-psa-crypto/programs/psa/crypto_examples.c $(DEP)
 	echo "  CC    psa/crypto_examples.c"
-	$(CC) $(LOCAL_CFLAGS) $(CFLAGS) psa/crypto_examples.c    $(LOCAL_LDFLAGS) $(LDFLAGS) -o $@
+	$(CC) $(LOCAL_CFLAGS) $(CFLAGS) ../tf-psa-crypto/programs/psa/crypto_examples.c    $(LOCAL_LDFLAGS) $(LDFLAGS) -o $@
 
-psa/hmac_demo$(EXEXT): psa/hmac_demo.c $(DEP)
+../tf-psa-crypto/programs/psa/hmac_demo$(EXEXT): ../tf-psa-crypto/programs/psa/hmac_demo.c $(DEP)
 	echo "  CC    psa/hmac_demo.c"
-	$(CC) $(LOCAL_CFLAGS) $(CFLAGS) psa/hmac_demo.c    $(LOCAL_LDFLAGS) $(LDFLAGS) -o $@
+	$(CC) $(LOCAL_CFLAGS) $(CFLAGS) ../tf-psa-crypto/programs/psa/hmac_demo.c    $(LOCAL_LDFLAGS) $(LDFLAGS) -o $@
 
-psa/key_ladder_demo$(EXEXT): psa/key_ladder_demo.c $(DEP)
+../tf-psa-crypto/programs/psa/key_ladder_demo$(EXEXT): ../tf-psa-crypto/programs/psa/key_ladder_demo.c $(DEP)
 	echo "  CC    psa/key_ladder_demo.c"
-	$(CC) $(LOCAL_CFLAGS) $(CFLAGS) psa/key_ladder_demo.c    $(LOCAL_LDFLAGS) $(LDFLAGS) -o $@
+	$(CC) $(LOCAL_CFLAGS) $(CFLAGS) ../tf-psa-crypto/programs/psa/key_ladder_demo.c    $(LOCAL_LDFLAGS) $(LDFLAGS) -o $@
 
-psa/psa_constant_names$(EXEXT): psa/psa_constant_names.c psa/psa_constant_names_generated.c $(DEP)
+../tf-psa-crypto/programs/psa/psa_constant_names$(EXEXT): ../tf-psa-crypto/programs/psa/psa_constant_names.c ../tf-psa-crypto/programs/psa/psa_constant_names_generated.c $(DEP)
 	echo "  CC    psa/psa_constant_names.c"
-	$(CC) $(LOCAL_CFLAGS) $(CFLAGS) psa/psa_constant_names.c    $(LOCAL_LDFLAGS) $(LDFLAGS) -o $@
+	$(CC) $(LOCAL_CFLAGS) $(CFLAGS) ../tf-psa-crypto/programs/psa/psa_constant_names.c    $(LOCAL_LDFLAGS) $(LDFLAGS) -o $@
+
+../tf-psa-crypto/programs/psa/psa_hash$(EXEXT): ../tf-psa-crypto/programs/psa/psa_hash.c $(DEP)
+	echo "  CC    psa/psa_hash.c"
+	$(CC) $(LOCAL_CFLAGS) $(CFLAGS) ../tf-psa-crypto/programs/psa/psa_hash.c    $(LOCAL_LDFLAGS) $(LDFLAGS) -o $@
 
 random/gen_entropy$(EXEXT): random/gen_entropy.c $(DEP)
 	echo "  CC    random/gen_entropy.c"
@@ -337,7 +303,7 @@ ssl/ssl_client1$(EXEXT): ssl/ssl_client1.c $(DEP)
 
 SSL_TEST_OBJECTS = test/query_config.o ssl/ssl_test_lib.o
 SSL_TEST_DEPS = $(SSL_TEST_OBJECTS) \
-		test/query_config.h \
+		$(FRAMEWORK)/tests/programs/query_config.h \
 		ssl/ssl_test_lib.h \
 		ssl/ssl_test_common_source.c \
 		$(DEP)
@@ -358,7 +324,7 @@ ssl/ssl_server2$(EXEXT): ssl/ssl_server2.c $(SSL_TEST_DEPS)
 	echo "  CC    ssl/ssl_server2.c"
 	$(CC) $(LOCAL_CFLAGS) $(CFLAGS) ssl/ssl_server2.c $(SSL_TEST_OBJECTS) $(LOCAL_LDFLAGS) $(LDFLAGS) -o $@
 
-ssl/ssl_context_info$(EXEXT): ssl/ssl_context_info.c test/query_config.o test/query_config.h $(DEP)
+ssl/ssl_context_info$(EXEXT): ssl/ssl_context_info.c test/query_config.o $(FRAMEWORK)/tests/programs/query_config.h $(DEP)
 	echo "  CC    ssl/ssl_context_info.c"
 	$(CC) $(LOCAL_CFLAGS) $(CFLAGS) ssl/ssl_context_info.c test/query_config.o $(LOCAL_LDFLAGS) $(LDFLAGS) -o $@
 
@@ -378,10 +344,6 @@ ssl/mini_client$(EXEXT): ssl/mini_client.c $(DEP)
 	echo "  CC    ssl/mini_client.c"
 	$(CC) $(LOCAL_CFLAGS) $(CFLAGS) ssl/mini_client.c   $(LOCAL_LDFLAGS) $(LDFLAGS) -o $@
 
-test/benchmark$(EXEXT): test/benchmark.c $(DEP)
-	echo "  CC    test/benchmark.c"
-	$(CC) $(LOCAL_CFLAGS) $(CFLAGS) test/benchmark.c   $(LOCAL_LDFLAGS) $(LDFLAGS) -o $@
-
 test/cpp_dummy_build.cpp: test/generate_cpp_dummy_build.sh
 	echo "  Gen   test/cpp_dummy_build.cpp"
 	test/generate_cpp_dummy_build.sh
@@ -399,9 +361,17 @@ test/dlopen$(EXEXT): test/dlopen.c $(DEP)
 	$(CC) $(LOCAL_CFLAGS) $(CFLAGS) test/dlopen.c $(LDFLAGS) $(DLOPEN_LDFLAGS) -o $@
 endif
 
-test/query_config.o: test/query_config.c test/query_config.h $(DEP)
+test/metatest$(EXEXT): $(FRAMEWORK)/tests/programs/metatest.c $(DEP)
+	echo "  CC    $(FRAMEWORK)/tests/programs/metatest.c"
+	$(CC) $(LOCAL_CFLAGS) $(CFLAGS) -I../library -I../tf-psa-crypto/core $(FRAMEWORK)/tests/programs/metatest.c    $(LOCAL_LDFLAGS) $(LDFLAGS) -o $@
+
+test/query_config.o: test/query_config.c $(FRAMEWORK)/tests/programs/query_config.h $(DEP)
 	echo "  CC    test/query_config.c"
 	$(CC) $(LOCAL_CFLAGS) $(CFLAGS) -c test/query_config.c -o $@
+
+test/query_included_headers$(EXEXT): $(FRAMEWORK)/tests/programs/query_included_headers.c $(DEP)
+	echo "  CC    $(FRAMEWORK)/tests/programs/query_included_headers.c"
+	$(CC) $(LOCAL_CFLAGS) $(CFLAGS) $(FRAMEWORK)/tests/programs/query_included_headers.c    $(LOCAL_LDFLAGS) $(LDFLAGS) -o $@
 
 test/selftest$(EXEXT): test/selftest.c $(DEP)
 	echo "  CC    test/selftest.c"
@@ -411,13 +381,13 @@ test/udp_proxy$(EXEXT): test/udp_proxy.c $(DEP)
 	echo "  CC    test/udp_proxy.c"
 	$(CC) $(LOCAL_CFLAGS) $(CFLAGS) test/udp_proxy.c    $(LOCAL_LDFLAGS) $(LDFLAGS) -o $@
 
-test/zeroize$(EXEXT): test/zeroize.c $(DEP)
-	echo "  CC    test/zeroize.c"
-	$(CC) $(LOCAL_CFLAGS) $(CFLAGS) test/zeroize.c    $(LOCAL_LDFLAGS) $(LDFLAGS) -o $@
+test/zeroize$(EXEXT): $(FRAMEWORK)/tests/programs/zeroize.c $(DEP)
+	echo "  CC    $(FRAMEWORK)/tests/programs/zeroize.c"
+	$(CC) $(LOCAL_CFLAGS) $(CFLAGS) $(FRAMEWORK)/tests/programs/zeroize.c    $(LOCAL_LDFLAGS) $(LDFLAGS) -o $@
 
-test/query_compile_time_config$(EXEXT): test/query_compile_time_config.c test/query_config.o test/query_config.h $(DEP)
-	echo "  CC    test/query_compile_time_config.c"
-	$(CC) $(LOCAL_CFLAGS) $(CFLAGS) test/query_compile_time_config.c test/query_config.o $(LOCAL_LDFLAGS) $(LDFLAGS) -o $@
+test/query_compile_time_config$(EXEXT): $(FRAMEWORK)/tests/programs/query_compile_time_config.c test/query_config.o $(FRAMEWORK)/tests/programs/query_config.h $(DEP)
+	echo "  CC    $(FRAMEWORK)/tests/programs/query_compile_time_config.c"
+	$(CC) $(LOCAL_CFLAGS) $(CFLAGS) $(FRAMEWORK)/tests/programs/query_compile_time_config.c test/query_config.o $(LOCAL_LDFLAGS) $(LDFLAGS) -o $@
 
 util/pem2der$(EXEXT): util/pem2der.c $(DEP)
 	echo "  CC    util/pem2der.c"
@@ -454,6 +424,7 @@ x509/req_app$(EXEXT): x509/req_app.c $(DEP)
 clean:
 ifndef WINDOWS
 	rm -f $(EXES)
+	rm -f */*.o
 	-rm -f ssl/ssl_pthread_server$(EXEXT)
 	-rm -f test/cpp_dummy_build.cpp test/cpp_dummy_build$(EXEXT)
 	-rm -f test/dlopen$(EXEXT)
@@ -463,13 +434,6 @@ else
 	if exist test\cpp_dummy_build.cpp del /Q /F test\cpp_dummy_build.cpp
 endif
 	$(MAKE) -C fuzz clean
-
-neat: clean
-ifndef WINDOWS
-	rm -f $(GENERATED_FILES)
-else
-	for %f in ($(subst /,\,$(GENERATED_FILES))) if exist %f del /Q /F %f
-endif
 
 list:
 	echo $(EXES)

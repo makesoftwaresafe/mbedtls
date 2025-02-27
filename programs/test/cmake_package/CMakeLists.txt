@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 2.8.12)
+cmake_minimum_required(VERSION 3.5.1)
 
 #
 # Simulate configuring and building Mbed TLS as the user might do it. We'll
@@ -13,7 +13,9 @@ execute_process(
         "-H${MbedTLS_SOURCE_DIR}"
         "-B${MbedTLS_BINARY_DIR}"
         "-DENABLE_PROGRAMS=NO"
-        "-DENABLE_TESTING=NO")
+        "-DENABLE_TESTING=NO"
+        # Turn on generated files explicitly in case this is a release
+        "-DGEN_FILES=ON")
 
 execute_process(
     COMMAND "${CMAKE_COMMAND}"
@@ -33,4 +35,4 @@ find_package(MbedTLS REQUIRED)
 
 add_executable(cmake_package cmake_package.c)
 target_link_libraries(cmake_package
-    MbedTLS::mbedcrypto MbedTLS::mbedtls MbedTLS::mbedx509)
+    MbedTLS::tfpsacrypto MbedTLS::mbedtls MbedTLS::mbedx509)

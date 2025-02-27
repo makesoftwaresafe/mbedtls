@@ -1,30 +1,20 @@
 /**
- * \file build_info.h
+ * \file mbedtls/build_info.h
  *
  * \brief Build-time configuration info
  *
  *  Include this file if you need to depend on the
  *  configuration options defined in mbedtls_config.h or MBEDTLS_CONFIG_FILE
  */
- /*
-  *  Copyright The Mbed TLS Contributors
-  *  SPDX-License-Identifier: Apache-2.0
-  *
-  *  Licensed under the Apache License, Version 2.0 (the "License"); you may
-  *  not use this file except in compliance with the License.
-  *  You may obtain a copy of the License at
-  *
-  *  http://www.apache.org/licenses/LICENSE-2.0
-  *
-  *  Unless required by applicable law or agreed to in writing, software
-  *  distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
-  *  WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-  *  See the License for the specific language governing permissions and
-  *  limitations under the License.
-  */
+/*
+ *  Copyright The Mbed TLS Contributors
+ *  SPDX-License-Identifier: Apache-2.0 OR GPL-2.0-or-later
+ */
 
 #ifndef MBEDTLS_BUILD_INFO_H
 #define MBEDTLS_BUILD_INFO_H
+
+#include "tf-psa-crypto/build_info.h"
 
 /*
  * This set of compile-time defines can be used to determine the version number
@@ -36,8 +26,8 @@
  * The version number x.y.z is split into three parts.
  * Major, Minor, Patchlevel
  */
-#define MBEDTLS_VERSION_MAJOR  3
-#define MBEDTLS_VERSION_MINOR  1
+#define MBEDTLS_VERSION_MAJOR  4
+#define MBEDTLS_VERSION_MINOR  0
 #define MBEDTLS_VERSION_PATCH  0
 
 /**
@@ -45,14 +35,18 @@
  *    MMNNPP00
  *    Major version | Minor version | Patch version
  */
-#define MBEDTLS_VERSION_NUMBER         0x03010000
-#define MBEDTLS_VERSION_STRING         "3.1.0"
-#define MBEDTLS_VERSION_STRING_FULL    "mbed TLS 3.1.0"
+#define MBEDTLS_VERSION_NUMBER         0x04000000
+#define MBEDTLS_VERSION_STRING         "4.0.0"
+#define MBEDTLS_VERSION_STRING_FULL    "Mbed TLS 4.0.0"
 
-#if defined(_MSC_VER) && !defined(_CRT_SECURE_NO_DEPRECATE)
-#define _CRT_SECURE_NO_DEPRECATE 1
+#if defined(MBEDTLS_CONFIG_FILES_READ)
+#error "Something went wrong: MBEDTLS_CONFIG_FILES_READ defined before reading the config files!"
+#endif
+#if defined(MBEDTLS_CONFIG_IS_FINALIZED)
+#error "Something went wrong: MBEDTLS_CONFIG_IS_FINALIZED defined before reading the config files!"
 #endif
 
+/* X.509 and TLS configuration */
 #if !defined(MBEDTLS_CONFIG_FILE)
 #include "mbedtls/mbedtls_config.h"
 #else
@@ -61,7 +55,7 @@
 
 #if defined(MBEDTLS_CONFIG_VERSION) && ( \
     MBEDTLS_CONFIG_VERSION < 0x03000000 || \
-    MBEDTLS_CONFIG_VERSION > MBEDTLS_VERSION_NUMBER )
+                             MBEDTLS_CONFIG_VERSION > MBEDTLS_VERSION_NUMBER)
 #error "Invalid config version, defined value of MBEDTLS_CONFIG_VERSION is unsupported"
 #endif
 
@@ -74,12 +68,22 @@
 #include MBEDTLS_USER_CONFIG_FILE
 #endif
 
-#if defined(MBEDTLS_PK_C) && defined(MBEDTLS_USE_PSA_CRYPTO)
-#define MBEDTLS_PK_WRITE_C
-#endif
-#if defined(MBEDTLS_PSA_CRYPTO_CONFIG)
-#include "mbedtls/config_psa.h"
-#endif
+/* Indicate that all configuration files have been read.
+ * It is now time to adjust the configuration (follow through on dependencies,
+ * make PSA and legacy crypto consistent, etc.).
+ */
+#define MBEDTLS_CONFIG_FILES_READ
+
+#include "mbedtls/config_adjust_x509.h"
+
+#include "mbedtls/config_adjust_ssl.h"
+
+/* Indicate that all configuration symbols are set,
+ * even the ones that are calculated programmatically.
+ * It is now safe to query the configuration (to check it, to size buffers,
+ * etc.).
+ */
+#define MBEDTLS_CONFIG_IS_FINALIZED
 
 #include "mbedtls/check_config.h"
 
